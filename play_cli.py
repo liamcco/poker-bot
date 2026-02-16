@@ -210,6 +210,11 @@ class PokerTUI(App[None]):
 
     #hand_row {
         height: 9;
+        margin-bottom: 0;
+    }
+
+    #hint_row {
+        height: 2;
         margin-bottom: 1;
     }
 
@@ -226,6 +231,22 @@ class PokerTUI(App[None]):
 
     .preview {
         border: ascii #f6b73c;
+    }
+
+    .hint-slot {
+        width: 16;
+        margin-right: 1;
+        content-align: center middle;
+        color: #5b6b7d;
+    }
+
+    .hint-on {
+        color: #d83a56;
+    }
+
+    .helper {
+        border: tall #d83a56;
+        color: #ffd9df;
     }
 
     .legal {
@@ -256,6 +277,7 @@ class PokerTUI(App[None]):
         self.rng = random.Random(args.seed)
         torch.manual_seed(args.seed)
         self.model, self.model_msg = load_or_init_model(args.model_path, args.hidden, self.device)
+        self.helper_model, self.helper_msg = load_or_init_model(args.model_path, args.hidden, self.device)
 
         self.n_players = args.bots + 1
         self.names = ["You"] + [f"Bot {i}" for i in range(1, args.bots + 1)]
@@ -273,12 +295,15 @@ class PokerTUI(App[None]):
         self.current_led_suit: Optional[Suit] = None
         self.current_trick_cards: List[Tuple[int, Card]] = []
         self.trick_history: List[str] = []
-        self.table_cards: List[Optional[Card]] = [None for _ in range(self.n_players)]
+        self.table_trick_rows: List[List[Optional[Card]]] = []
 
         self.input_mode = "idle"
         self.selected_discards: set[int] = set()
         self.current_legal_indices: set[int] = set()
         self.revealed_card: Optional[Card] = None
+        self.helper_draw_indices: set[int] = set()
+        self.helper_trick_index: Optional[int] = None
+        self.helper_keep_choice: Optional[bool] = None
         self._input_future: Optional[asyncio.Future] = None
 
         self.game_over = False
@@ -292,13 +317,16 @@ class PokerTUI(App[None]):
                 yield Static(id="trick_state")
                 yield RichLog(id="log", highlight=False, markup=False, auto_scroll=True)
             with Vertical(id="center_col"):
-                yield Static("Cards On Table (Current Trick)", id="played_title")
+                yield Static("Cards On Table (Round History)", id="played_title")
                 yield Static("", id="table_view")
                 yield Static("", id="center_spacer")
                 yield Static("Your Hand", id="hand_title")
                 with Horizontal(id="hand_row"):
                     for i in range(5):
                         yield Button("", id=f"card-{i}", classes="card")
+                with Horizontal(id="hint_row"):
+                    for i in range(5):
+                        yield Static(" ", id=f"hint-{i}", classes="hint-slot")
                 with Horizontal(id="controls"):
                     yield Button("Confirm", id="confirm", classes="control")
                     yield Button("Clear", id="clear", classes="control")
@@ -310,6 +338,8 @@ class PokerTUI(App[None]):
         self._set_default_controls()
         self._refresh_all()
         self._log(self.model_msg)
+        self._log(self.helper_msg)
+        self._log("Helper active: red marker shows what the helper model would do.")
         self._log(f"Device: {self.device}")
         self.run_worker(self._game_loop(), exclusive=True)
 
@@ -340,13 +370,38 @@ class PokerTUI(App[None]):
         self._refresh_trick_state()
         self._refresh_table_cards()
         self._refresh_hand_buttons()
+        self._refresh_hint_bars()
+        self._refresh_helper_controls()
+
+    def _refresh_hint_bars(self) -> None:
+        helper_indices: set[int] = set()
+        if self.input_mode == "draw_select":
+            helper_indices = set(self.helper_draw_indices)
+        elif self.input_mode == "trick_select" and self.helper_trick_index is not None:
+            helper_indices = {self.helper_trick_index}
+
+        hand_len = len(self.hands[0]) if self.hands else 0
+        for i in range(5):
+            hint = self.query_one(f"#hint-{i}", Static)
+            hint.remove_class("hint-on")
+            if i < hand_len and i in helper_indices:
+                hint.update("━━━━")
+                hint.add_class("hint-on")
+            else:
+                hint.update(" ")
 
     def _refresh_table_cards(self) -> None:
-        lines = []
-        for i in range(self.n_players):
-            card = self.table_cards[i]
-            card_text = "--" if card is None else card_str(card)
-            lines.append(f"{self.names[i]:<8} {card_text}")
+        lines: List[str] = []
+        header = "Trick  " + "  ".join(f"{name[:6]:>6}" for name in self.names)
+        lines.append(header)
+        lines.append("-" * len(header))
+
+        if not self.table_trick_rows:
+            lines.append("No trick cards played this round yet.")
+        else:
+            for trick_idx, row in enumerate(self.table_trick_rows, start=1):
+                row_cards = "  ".join(f"{('--' if c is None else card_str(c)):>6}" for c in row)
+                lines.append(f"T{trick_idx:<2}    {row_cards}")
         table = self.query_one("#table_view", Static)
         table.update("\n".join(lines))
         table.refresh(layout=False)
@@ -435,25 +490,79 @@ class PokerTUI(App[None]):
                 btn.label = ""
                 btn.disabled = True
 
+    def _refresh_helper_controls(self) -> None:
+        keep_btn = self.query_one("#keep", Button)
+        reject_btn = self.query_one("#reject", Button)
+        keep_btn.remove_class("helper")
+        reject_btn.remove_class("helper")
+        if self.input_mode == "draw_reveal" and self.helper_keep_choice is not None:
+            if self.helper_keep_choice:
+                keep_btn.add_class("helper")
+            else:
+                reject_btn.add_class("helper")
+
+    def _compute_helper_draw_hint(self, phase: int) -> None:
+        if self.deck is None or not self.hands:
+            self.helper_draw_indices = set()
+            self.helper_keep_choice = None
+            return
+        action = choose_bot_draw_action(
+            self.helper_model,
+            self.hands[0],
+            phase,
+            len(self.deck.cards),
+            self.device,
+        )
+        discard_mask, reject_single = draw_action_to_mask_and_reject(action)
+        self.helper_draw_indices = {i for i in range(5) if ((discard_mask >> i) & 1) == 1}
+        if phase == 1:
+            self.helper_keep_choice = not reject_single
+        else:
+            self.helper_keep_choice = None
+
+    def _compute_helper_trick_hint(
+        self,
+        legal: Sequence[int],
+        trick_no: int,
+        led_suit: Optional[Suit],
+    ) -> None:
+        if not self.hands:
+            self.helper_trick_index = None
+            return
+        self.helper_trick_index = choose_bot_trick_action(
+            self.helper_model,
+            self.hands[0],
+            led_suit,
+            trick_no,
+            legal,
+            self.device,
+        )
+
     def _clear_prompt_state(self) -> None:
         self.input_mode = "idle"
         self.selected_discards.clear()
         self.current_legal_indices.clear()
         self.revealed_card = None
+        self.helper_draw_indices = set()
+        self.helper_trick_index = None
         self._input_future = None
         self._set_default_controls()
         self._refresh_all()
 
     def _resolve_input(self, value) -> None:
+        mode = self.input_mode
         future = self._input_future
         if future is not None and not future.done():
             future.set_result(value)
+        if mode == "draw_reveal":
+            self.helper_keep_choice = None
         self._clear_prompt_state()
 
     async def _prompt_human_draw(self, phase: int) -> int:
         self.input_mode = "draw_select"
         self.current_phase = phase
         self.selected_discards.clear()
+        self._compute_helper_draw_hint(phase)
         self._set_draw_controls()
         self._refresh_all()
         loop = asyncio.get_running_loop()
@@ -476,6 +585,7 @@ class PokerTUI(App[None]):
         self.current_trick_no = trick_no
         self.current_led_suit = led_suit
         self.current_legal_indices = set(legal)
+        self._compute_helper_trick_hint(legal, trick_no, led_suit)
         self._set_default_controls()
         self._refresh_all()
         loop = asyncio.get_running_loop()
@@ -569,7 +679,7 @@ class PokerTUI(App[None]):
             self.current_trick_no = trick_no
             self.current_led_suit = None
             self.current_trick_cards = []
-            self.table_cards = [None for _ in range(self.n_players)]
+            self.table_trick_rows.append([None for _ in range(self.n_players)])
             self._log(f"Trick {trick_no + 1}, leader: {self.names[leader]}")
             self._refresh_all()
             await asyncio.sleep(0)
@@ -597,7 +707,7 @@ class PokerTUI(App[None]):
                 if self.current_led_suit is None:
                     self.current_led_suit = card.suit
                 self.current_trick_cards.append((p, card))
-                self.table_cards[p] = card
+                self.table_trick_rows[trick_no][p] = card
                 self._log(f"{self.names[p]} plays {card_str(card)}")
 
                 if p == 0:
@@ -619,7 +729,6 @@ class PokerTUI(App[None]):
         self.current_trick_no = -1
         self.current_led_suit = None
         self.current_trick_cards = []
-        self.table_cards = [None for _ in range(self.n_players)]
         self._refresh_trick_state()
         self._refresh_table_cards()
         return last_winner
@@ -633,7 +742,7 @@ class PokerTUI(App[None]):
             self.hands = [self.deck.draw(5) for _ in range(self.n_players)]
             self.current_player = 0
             self.trick_history.clear()
-            self.table_cards = [None for _ in range(self.n_players)]
+            self.table_trick_rows = []
             self._refresh_all()
 
             draw1_winner = await self._run_draw_phase(0)
