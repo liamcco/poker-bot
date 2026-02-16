@@ -710,7 +710,7 @@ class PokerTUI(App[None]):
                 keep_btn.add_class("helper")
             else:
                 reject_btn.add_class("helper")
-        elif self.input_mode == "draw_select" and len(self.helper_draw_indices) == 0:
+        elif self.input_mode == "draw_select" and not self.helper_draw_indices:
             confirm_btn.add_class("confirm-helper-no-draw")
 
     def _compute_helper_draw_hint(self, phase: int) -> None:
@@ -868,13 +868,15 @@ class PokerTUI(App[None]):
 
         self._refresh_all()
 
-    def _run_first_scoring_announcements(self) -> None:
-        self._log("--- Scoring Phase 1: Announcements ---")
-        
-        # Show each player's hand category
+    def _log_player_hand_categories(self) -> None:
+        """Log each player's hand category."""
         for p in range(self.n_players):
             hand_val = evaluate_hand(self.hands[p])
             self._log(f"{self.names[p]}: {category_name(hand_val.category)}")
+
+    def _run_first_scoring_announcements(self) -> None:
+        self._log("--- Scoring Phase 1: Announcements ---")
+        self._log_player_hand_categories()
         
         result = resolve_first_scoring_announcements(self.hands, start_player=self.announcement_order_start)
         self.round_announced_points = result.announced_points
@@ -974,9 +976,7 @@ class PokerTUI(App[None]):
 
         # Scoring Phase 2 - show each player's hand
         self._log("--- Scoring Phase 2 ---")
-        for p in range(self.n_players):
-            hand_val = evaluate_hand(self.hands[p])
-            self._log(f"{self.names[p]}: {category_name(hand_val.category)}")
+        self._log_player_hand_categories()
 
         if hv.points > 0:
             self.scores[winner] += hv.points
