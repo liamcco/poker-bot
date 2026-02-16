@@ -81,6 +81,31 @@ class HandValue:
         return int(self.category)
 
 
+@dataclass(frozen=True)
+class DrawOutcome:
+    discarded_cards: List[Card]
+    shown_card: Optional[Card]
+    kept_shown: Optional[bool]
+
+
+@dataclass(frozen=True)
+class AnnouncementResult:
+    announced_points: List[Optional[int]]
+    passed: List[bool]
+    first_announcer: Optional[int]
+    scoring_winner: Optional[int]
+    winning_points: int
+    showdown_starter: int
+    tie_reveal_events: List["TieRevealEvent"]
+
+
+@dataclass(frozen=True)
+class TieRevealEvent:
+    component_idx: int
+    player: int
+    revealed_value: Optional[int]
+
+
 def _is_straight(ranks: List[int]) -> Tuple[bool, int]:
     uniq = sorted(set(ranks), reverse=True)
     if len(uniq) != 5:
@@ -198,29 +223,117 @@ def best_hand_index(hands: List[List[Card]]) -> Tuple[int, HandValue]:
     return i, vals[i]
 
 
+def resolve_first_scoring_announcements(
+    hands: Sequence[Sequence[Card]],
+    start_player: int,
+) -> AnnouncementResult:
+    n_players = len(hands)
+    announced_points: List[Optional[int]] = [None for _ in range(n_players)]
+    passed = [False for _ in range(n_players)]
+
+    best_points = 0
+    first_announcer: Optional[int] = None
+    scoring_winner: Optional[int] = None
+    contenders: List[int] = []
+    tie_reveal_events: List[TieRevealEvent] = []
+
+    for off in range(n_players):
+        p = (start_player + off) % n_players
+        hv = evaluate_hand(hands[p])
+        points = hv.points
+        if points > best_points:
+            announced_points[p] = points
+            best_points = points
+            scoring_winner = p
+            contenders = [p]
+            if first_announcer is None:
+                first_announcer = p
+        elif points == best_points and points > 0:
+            announced_points[p] = points
+            contenders.append(p)
+        else:
+            passed[p] = True
+
+    showdown_starter = start_player
+    if len(contenders) > 1:
+        ordered_contenders = sorted(
+            contenders,
+            key=lambda p: (p - showdown_starter) % n_players,
+        )
+        tie_keys: Dict[int, Tuple[int, ...]] = {p: evaluate_hand(hands[p]).key[1:] for p in contenders}
+        active = set(contenders)
+        max_components = max((len(tie_keys[p]) for p in contenders), default=0)
+
+        for comp_idx in range(max_components):
+            current_best: Optional[int] = None
+            comp_values: Dict[int, int] = {}
+
+            for p in ordered_contenders:
+                if p not in active:
+                    continue
+                v = tie_keys[p][comp_idx] if comp_idx < len(tie_keys[p]) else -1
+                comp_values[p] = v
+                if current_best is None or v > current_best:
+                    tie_reveal_events.append(TieRevealEvent(component_idx=comp_idx, player=p, revealed_value=v))
+                    current_best = v
+                else:
+                    tie_reveal_events.append(TieRevealEvent(component_idx=comp_idx, player=p, revealed_value=None))
+
+            if current_best is None:
+                continue
+            active = {p for p in active if comp_values.get(p, -1) == current_best}
+            if len(active) <= 1:
+                break
+
+        if active:
+            scoring_winner = sorted(active, key=lambda p: (p - showdown_starter) % n_players)[0]
+
+    return AnnouncementResult(
+        announced_points=announced_points,
+        passed=passed,
+        first_announcer=first_announcer,
+        scoring_winner=scoring_winner,
+        winning_points=best_points,
+        showdown_starter=showdown_starter,
+        tie_reveal_events=tie_reveal_events,
+    )
+
+
 def apply_draw(
     deck: Deck,
     hand: List[Card],
     discard_mask_5bits: int,
     reject_single_draw: bool = False,
-) -> None:
+    reveal_single_draw: bool = False,
+) -> DrawOutcome:
     discard_indices = [i for i in range(5) if (discard_mask_5bits >> i) & 1]
+    discarded_cards = [hand[i] for i in discard_indices]
     for i in sorted(discard_indices, reverse=True):
         hand.pop(i)
 
     n_discards = len(discard_indices)
-    if n_discards == 1:
+    shown_card: Optional[Card] = None
+    kept_shown: Optional[bool] = None
+    if n_discards == 1 and reveal_single_draw:
         first_card = deck.draw(1)[0]
+        shown_card = first_card
         if reject_single_draw:
-            replacement = deck.draw(1)[0]
+            if len(deck.cards) > 0:
+                replacement = deck.draw(1)[0]
+                kept_shown = False
+            else:
+                replacement = first_card
+                kept_shown = True
         else:
             replacement = first_card
+            kept_shown = True
         hand.append(replacement)
     else:
         hand.extend(deck.draw(n_discards))
 
     if len(hand) != 5:
         raise RuntimeError("Hand must remain 5 cards after draw")
+    return DrawOutcome(discarded_cards=discarded_cards, shown_card=shown_card, kept_shown=kept_shown)
 
 
 def legal_indices(hand: List[Card], led_suit: Optional[Suit]) -> List[int]:

@@ -42,7 +42,7 @@ Each round proceeds in the following order:
 
 1. **Deal 5 cards** to each player
 2. **Draw 1** (free replacement draw)
-3. **Scoring Phase 1**
+3. **Scoring Phase 1** (announcements with pass / 1-up rule)
 4. **Draw 2** (free replacement draw)
 5. **Scoring Phase 2**
 6. **Trick-Taking Showdown** (5 tricks; winner of the **5th trick** gets **+5p**)
@@ -63,14 +63,16 @@ Then a new round begins.
 There are **two draw phases** per round.
 
 ### 6.1 Draw 1
+- Draw order is clockwise, starting from the round's leader seat.
 - Each player may discard **any number of cards** (0–5).
 - The player draws the same number of replacement cards.
 - A player must always end with **exactly 5 cards**.
 
 ### 6.2 Draw 2
+- Draw order is clockwise, starting from the same round leader seat as Draw 1.
 - Same rules as Draw 1: discard 0–5 and draw back to 5 cards.
 
-**Special rule when drawing exactly one card:**
+**Special rule in Draw 2 when drawing exactly one card:**
 - The drawn card is shown to all players.
 - The player may either:
   - Keep the shown card, **or**
@@ -101,9 +103,18 @@ Hands follow standard poker definitions, but only the hands listed below award p
 Hands not listed (e.g., High Card) score **0 points**.
 
 ### 7.2 Scoring Phase 1 (after Draw 1)
-- All players reveal and compare hands.
-- **Only one player scores:** the player with the best scoring hand.
-- If no player has a scoring hand, **no points are awarded**.
+- Players announce clockwise, starting from the round's announcement seat.
+- The announcement seat rotates clockwise by one player each new round.
+- The round's announcement seat is also the round's leader seat:
+  this player draws first in both draw phases, announces first in Scoring Phase 1, and leads Trick 1.
+- A player may announce if they can still contest the current best point level.
+- If a player cannot contest the current best, they say **"pass"**.
+- If multiple players remain tied on the top announced point level, resolve the tie by incremental reveal:
+  Players reveal only the next tie-break element required by Section 8, clockwise, starting from the showdown leader.
+- At each tie-break element, a player that cannot beat the currently revealed best value says **"pass"** and reveals nothing further for that element.
+- Continue element-by-element until only one tied player remains.
+- Only the winning tied player scores the announced points.
+- If all players pass (no announced points), no points are awarded in Scoring Phase 1.
 
 ### 7.3 Scoring Phase 2 (after Draw 2)
 - Hands are compared again.
@@ -152,6 +163,7 @@ After Scoring Phase 2, players use their current 5 cards to play a 5-trick trick
 
 ### 9.1 Trick rules
 - Each player plays one card per trick.
+- The leader for Trick 1 is the round's leader seat (the same player who drew first and announced first).
 - Players must **follow suit if possible**.
 - Highest card of the led suit wins the trick.
 - The trick winner leads the next trick.

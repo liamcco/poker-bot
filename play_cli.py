@@ -8,7 +8,16 @@ from typing import List, Optional, Sequence, Tuple
 
 import torch
 
-from game_logic import Card, Category, Deck, Suit, best_hand_index, legal_indices
+from game_logic import (
+    Card,
+    Category,
+    Deck,
+    Suit,
+    TieRevealEvent,
+    best_hand_index,
+    legal_indices,
+    resolve_first_scoring_announcements,
+)
 from poker_ml import PolicyNet, build_draw_action_mask, build_obs_draw, build_obs_trick, sample_categorical
 
 try:
@@ -53,11 +62,12 @@ def card_str(card: Card) -> str:
     return f"{RANK_TO_STR[int(card.rank)]}{SUIT_TO_STR[card.suit]}"
 
 
-def remove_by_discard_mask(hand: List[Card], discard_mask_5bits: int) -> int:
+def remove_by_discard_mask(hand: List[Card], discard_mask_5bits: int) -> List[Card]:
     discard_indices = [i for i in range(5) if (discard_mask_5bits >> i) & 1]
+    discarded_cards = [hand[i] for i in discard_indices]
     for i in sorted(discard_indices, reverse=True):
         hand.pop(i)
-    return len(discard_indices)
+    return discarded_cards
 
 
 def draw_action_to_mask_and_reject(action: int) -> Tuple[int, bool]:
@@ -72,8 +82,35 @@ def choose_bot_draw_action(
     phase: int,
     deck_cards_left: int,
     device: torch.device,
+    scores: Sequence[int],
+    last_round_scores: Sequence[int],
+    n_players: int,
+    self_player: int,
+    target_score: int,
+    showdown_starter: Optional[int],
+    table_history: Sequence[Sequence[Optional[Card]]],
+    discard_history: Sequence[Sequence[Sequence[Card]]],
+    shown_history: Sequence[Optional[Tuple[Card, bool]]],
+    announced_points: Sequence[Optional[int]],
+    passed: Sequence[bool],
+    tie_reveal_events: Sequence[TieRevealEvent],
 ) -> int:
-    obs = build_obs_draw(hand, phase=phase).to(device)
+    obs = build_obs_draw(
+        hand,
+        phase=phase,
+        scores=scores,
+        last_round_scores=last_round_scores,
+        n_players=n_players,
+        self_player=self_player,
+        target_score=target_score,
+        showdown_starter=showdown_starter,
+        table_history=table_history,
+        discard_history=discard_history,
+        shown_history=shown_history,
+        announced_points=announced_points,
+        passed=passed,
+        tie_reveal_events=tie_reveal_events,
+    ).to(device)
     with torch.no_grad():
         draw_logits, _, _ = model(obs)
     mask = build_draw_action_mask(deck_cards_left, phase=phase).to(device)
@@ -87,8 +124,36 @@ def choose_bot_trick_action(
     trick_no: int,
     legal: Sequence[int],
     device: torch.device,
+    scores: Sequence[int],
+    last_round_scores: Sequence[int],
+    n_players: int,
+    self_player: int,
+    target_score: int,
+    table_history: Sequence[Sequence[Optional[Card]]],
+    discard_history: Sequence[Sequence[Sequence[Card]]],
+    shown_history: Sequence[Optional[Tuple[Card, bool]]],
+    announced_points: Sequence[Optional[int]],
+    passed: Sequence[bool],
+    tie_reveal_events: Sequence[TieRevealEvent],
+    showdown_starter: Optional[int],
 ) -> int:
-    obs = build_obs_trick(hand, led_suit, trick_no).to(device)
+    obs = build_obs_trick(
+        hand,
+        led_suit,
+        trick_no,
+        scores=scores,
+        last_round_scores=last_round_scores,
+        n_players=n_players,
+        self_player=self_player,
+        target_score=target_score,
+        table_history=table_history,
+        discard_history=discard_history,
+        shown_history=shown_history,
+        announced_points=announced_points,
+        passed=passed,
+        tie_reveal_events=tie_reveal_events,
+        showdown_starter=showdown_starter,
+    ).to(device)
     with torch.no_grad():
         _, trick_logits, _ = model(obs)
     mask = torch.zeros(5, dtype=torch.float32, device=device)
@@ -282,7 +347,9 @@ class PokerTUI(App[None]):
         self.n_players = args.bots + 1
         self.names = ["You"] + [f"Bot {i}" for i in range(1, args.bots + 1)]
         self.scores = [0 for _ in range(self.n_players)]
+        self.last_round_scores = [0 for _ in range(self.n_players)]
         self.circle_round: List[Optional[int]] = [None for _ in range(self.n_players)]
+        self.announcement_order_start = 0
         self.starting_player = 0
         self.round_no = 0
 
@@ -296,6 +363,11 @@ class PokerTUI(App[None]):
         self.current_trick_cards: List[Tuple[int, Card]] = []
         self.trick_history: List[str] = []
         self.table_trick_rows: List[List[Optional[Card]]] = []
+        self.round_discard_history: List[List[List[Card]]] = [[[] for _ in range(self.n_players)] for _ in range(2)]
+        self.round_shown_history: List[Optional[Tuple[Card, bool]]] = [None for _ in range(self.n_players)]
+        self.round_announced_points: List[Optional[int]] = [None for _ in range(self.n_players)]
+        self.round_passed: List[bool] = [False for _ in range(self.n_players)]
+        self.round_tie_reveal_events: List[TieRevealEvent] = []
 
         self.input_mode = "idle"
         self.selected_discards: set[int] = set()
@@ -512,6 +584,18 @@ class PokerTUI(App[None]):
             phase,
             len(self.deck.cards),
             self.device,
+            scores=self.scores,
+            last_round_scores=self.last_round_scores,
+            n_players=self.n_players,
+            self_player=0,
+            target_score=self.args.target,
+            showdown_starter=(self.starting_player if phase == 1 else self.announcement_order_start),
+            table_history=self.table_trick_rows,
+            discard_history=self.round_discard_history,
+            shown_history=self.round_shown_history,
+            announced_points=self.round_announced_points,
+            passed=self.round_passed,
+            tie_reveal_events=self.round_tie_reveal_events,
         )
         discard_mask, reject_single = draw_action_to_mask_and_reject(action)
         self.helper_draw_indices = {i for i in range(5) if ((discard_mask >> i) & 1) == 1}
@@ -536,6 +620,18 @@ class PokerTUI(App[None]):
             trick_no,
             legal,
             self.device,
+            scores=self.scores,
+            last_round_scores=self.last_round_scores,
+            n_players=self.n_players,
+            self_player=0,
+            target_score=self.args.target,
+            table_history=self.table_trick_rows,
+            discard_history=self.round_discard_history,
+            shown_history=self.round_shown_history,
+            announced_points=self.round_announced_points,
+            passed=self.round_passed,
+            tie_reveal_events=self.round_tie_reveal_events,
+            showdown_starter=self.starting_player,
         )
 
     def _clear_prompt_state(self) -> None:
@@ -595,7 +691,9 @@ class PokerTUI(App[None]):
     async def _apply_draw(self, player: int, phase: int, discard_mask: int, reject_single: bool) -> None:
         assert self.deck is not None
         hand = self.hands[player]
-        n_discards = remove_by_discard_mask(hand, discard_mask)
+        discarded_cards = remove_by_discard_mask(hand, discard_mask)
+        n_discards = len(discarded_cards)
+        self.round_discard_history[phase][player].extend(discarded_cards)
 
         if phase == 1 and n_discards == 1:
             shown = self.deck.draw(1)[0]
@@ -609,14 +707,17 @@ class PokerTUI(App[None]):
                     replacement = self.deck.draw(1)[0]
                     hand.append(replacement)
                     self._log(f"You rejected it and took {card_str(replacement)}.")
+                self.round_shown_history[player] = (shown, keep)
             else:
                 if reject_single and len(self.deck.cards) > 0:
                     replacement = self.deck.draw(1)[0]
                     hand.append(replacement)
                     self._log(f"{self.names[player]} rejected shown card and took a face-down replacement.")
+                    self.round_shown_history[player] = (shown, False)
                 else:
                     hand.append(shown)
                     self._log(f"{self.names[player]} kept the shown card.")
+                    self.round_shown_history[player] = (shown, True)
         else:
             hand.extend(self.deck.draw(n_discards))
             if player == 0:
@@ -627,13 +728,60 @@ class PokerTUI(App[None]):
 
         self._refresh_all()
 
+    def _run_first_scoring_announcements(self) -> None:
+        self._log("--- Scoring Phase 1: Announcements ---")
+        result = resolve_first_scoring_announcements(self.hands, start_player=self.announcement_order_start)
+        self.round_announced_points = result.announced_points
+        self.round_passed = result.passed
+        self.round_tie_reveal_events = result.tie_reveal_events
+        self.starting_player = result.showdown_starter
+
+        for off in range(self.n_players):
+            p = (self.announcement_order_start + off) % self.n_players
+            announced = result.announced_points[p]
+            if announced is None:
+                self._log(f"{self.names[p]}: pass")
+            else:
+                self._log(f"{self.names[p]}: announces {announced} point(s)")
+
+        self._log(
+            f"{self.names[self.starting_player]} is this round's leader seat "
+            "(draws first, announces first, and leads showdown)."
+        )
+
+        if result.tie_reveal_events:
+            self._log("Tie-break reveal sequence:")
+            for ev in result.tie_reveal_events:
+                if ev.revealed_value is None:
+                    self._log(
+                        f"  {self.names[ev.player]} passes at tie step {ev.component_idx + 1}."
+                    )
+                else:
+                    self._log(
+                        f"  {self.names[ev.player]} reveals value {ev.revealed_value} at tie step {ev.component_idx + 1}."
+                    )
+
+        if result.scoring_winner is not None and result.winning_points > 0:
+            winner = result.scoring_winner
+            points = result.winning_points
+            self.scores[winner] += points
+            self._log(f"{self.names[winner]} wins Scoring Phase 1 (+{points}).")
+            if self.scores[winner] >= self.args.target and self.circle_round[winner] is None:
+                self.circle_round[winner] = self.round_no
+                self._log(f"{self.names[winner]} reached {self.args.target}+ and has a circle.")
+        else:
+            self._log("No points announced in Scoring Phase 1.")
+
+        self._refresh_scores()
+
     async def _run_draw_phase(self, phase: int) -> Optional[int]:
         phase_name = "Draw 1" if phase == 0 else "Draw 2"
         self.current_phase = phase
         self._log(f"--- {phase_name} ---")
         self._refresh_all()
 
-        for p in range(self.n_players):
+        for off in range(self.n_players):
+            p = (self.announcement_order_start + off) % self.n_players
             self.current_player = p
             self._refresh_all()
             if p == 0:
@@ -641,7 +789,25 @@ class PokerTUI(App[None]):
                 reject_single = False
             else:
                 assert self.deck is not None
-                action = choose_bot_draw_action(self.model, self.hands[p], phase, len(self.deck.cards), self.device)
+                action = choose_bot_draw_action(
+                    self.model,
+                    self.hands[p],
+                    phase,
+                    len(self.deck.cards),
+                    self.device,
+                    scores=self.scores,
+                    last_round_scores=self.last_round_scores,
+                    n_players=self.n_players,
+                    self_player=p,
+                    target_score=self.args.target,
+                    showdown_starter=(self.starting_player if phase == 1 else self.announcement_order_start),
+                    table_history=self.table_trick_rows,
+                    discard_history=self.round_discard_history,
+                    shown_history=self.round_shown_history,
+                    announced_points=self.round_announced_points,
+                    passed=self.round_passed,
+                    tie_reveal_events=self.round_tie_reveal_events,
+                )
                 discard_mask, reject_single = draw_action_to_mask_and_reject(action)
                 if phase == 0 or bit_count(discard_mask) != 1:
                     reject_single = False
@@ -655,6 +821,10 @@ class PokerTUI(App[None]):
             self.game_over = True
             self._refresh_all()
             return winner
+
+        if phase == 0:
+            self._run_first_scoring_announcements()
+            return None
 
         if hv.points > 0:
             self.scores[winner] += hv.points
@@ -701,6 +871,18 @@ class PokerTUI(App[None]):
                         trick_no,
                         legal,
                         self.device,
+                        scores=self.scores,
+                        last_round_scores=self.last_round_scores,
+                        n_players=self.n_players,
+                        self_player=p,
+                        target_score=self.args.target,
+                        table_history=self.table_trick_rows,
+                        discard_history=self.round_discard_history,
+                        shown_history=self.round_shown_history,
+                        announced_points=self.round_announced_points,
+                        passed=self.round_passed,
+                        tie_reveal_events=self.round_tie_reveal_events,
+                        showdown_starter=self.starting_player,
                     )
 
                 card = hand.pop(action)
@@ -737,12 +919,19 @@ class PokerTUI(App[None]):
         while not self.game_over:
             self.round_no += 1
             self._log(f"=== Round {self.round_no} ===")
+            self.last_round_scores = self.scores.copy()
 
             self.deck = Deck(self.rng)
             self.hands = [self.deck.draw(5) for _ in range(self.n_players)]
+            self.starting_player = self.announcement_order_start
             self.current_player = 0
             self.trick_history.clear()
             self.table_trick_rows = []
+            self.round_discard_history = [[[] for _ in range(self.n_players)] for _ in range(2)]
+            self.round_shown_history = [None for _ in range(self.n_players)]
+            self.round_announced_points = [None for _ in range(self.n_players)]
+            self.round_passed = [False for _ in range(self.n_players)]
+            self.round_tie_reveal_events = []
             self._refresh_all()
 
             draw1_winner = await self._run_draw_phase(0)
@@ -764,7 +953,7 @@ class PokerTUI(App[None]):
                 self._log(f"{self.names[last_winner]} reached {self.args.target}+ and has a circle.")
 
             self._refresh_scores()
-            self.starting_player = (self.starting_player + 1) % self.n_players
+            self.announcement_order_start = (self.announcement_order_start + 1) % self.n_players
 
             if self.circle_round[last_winner] is not None and self.circle_round[last_winner] < self.round_no:
                 self._log(f"{self.names[last_winner]} had a circle before this round and won showdown.")
