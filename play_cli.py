@@ -877,7 +877,7 @@ class PokerTUI(App[None]):
     def _run_first_scoring_announcements(self) -> None:
         self._log("--- Scoring Phase 1: Announcements ---")
         self._log_player_hand_categories()
-        
+
         result = resolve_first_scoring_announcements(self.hands, start_player=self.announcement_order_start)
         self.round_announced_points = result.announced_points
         self.round_passed = result.passed
