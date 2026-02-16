@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import glob
 import os
 import random
+import re
 from typing import List, Optional, Sequence, Tuple
 
 import torch
@@ -205,6 +207,27 @@ def load_or_init_model(checkpoint_path: str, hidden: int, device: torch.device) 
     return model, f"No checkpoint found at {checkpoint_path}; using random untrained model."
 
 
+def _checkpoint_episode(path: str) -> int:
+    m = re.search(r"checkpoint_ep(\d+)\.pt$", os.path.basename(path))
+    return int(m.group(1)) if m else -1
+
+
+def resolve_model_path(model_path: Optional[str], out_dir: str) -> Optional[str]:
+    if model_path:
+        return model_path
+
+    pattern = os.path.join(out_dir, "checkpoint_ep*.pt")
+    checkpoints = glob.glob(pattern)
+    if checkpoints:
+        checkpoints.sort(key=_checkpoint_episode)
+        return checkpoints[-1]
+
+    final_path = os.path.join(out_dir, "final_model.pt")
+    if os.path.exists(final_path):
+        return final_path
+    return None
+
+
 class PokerTUI(App[None]):
     CSS = """
     Screen {
@@ -341,8 +364,11 @@ class PokerTUI(App[None]):
         self.device = torch.device("cuda" if (args.cuda and torch.cuda.is_available()) else "cpu")
         self.rng = random.Random(args.seed)
         torch.manual_seed(args.seed)
-        self.model, self.model_msg = load_or_init_model(args.model_path, args.hidden, self.device)
-        self.helper_model, self.helper_msg = load_or_init_model(args.model_path, args.hidden, self.device)
+        resolved_model_path = resolve_model_path(args.model_path, args.out_dir)
+        if resolved_model_path is None:
+            resolved_model_path = os.path.join(args.out_dir, "checkpoint_ep0.pt")
+        self.model, self.model_msg = load_or_init_model(resolved_model_path, args.hidden, self.device)
+        self.helper_model, self.helper_msg = load_or_init_model(resolved_model_path, args.hidden, self.device)
 
         self.n_players = args.bots + 1
         self.names = ["You"] + [f"Bot {i}" for i in range(1, args.bots + 1)]
@@ -1029,7 +1055,18 @@ class PokerTUI(App[None]):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Play 2-draw showdown poker in a Textual TUI.")
-    p.add_argument("--model-path", type=str, default="rl_runs/final_model.pt")
+    p.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="Optional explicit model path. Default: latest checkpoint in --out-dir.",
+    )
+    p.add_argument(
+        "--out-dir",
+        type=str,
+        default="rl_runs",
+        help="Training output directory used to auto-pick latest checkpoint.",
+    )
     p.add_argument("--hidden", type=int, default=256, help="Hidden size for random fallback model.")
     p.add_argument("--bots", type=int, default=1, help="Number of model opponents (1-5).")
     p.add_argument("--target", type=int, default=50, help="Score target for getting a circle.")

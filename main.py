@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import time
 
 import torch
 import torch.nn.functional as F
@@ -24,6 +25,7 @@ def train(args: argparse.Namespace) -> None:
 
     wins0 = 0
     rounds_sum = 0
+    train_start_time = time.time()
 
     for ep in range(1, args.episodes + 1):
         model.train()
@@ -89,13 +91,25 @@ def train(args: argparse.Namespace) -> None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         opt.step()
 
+        elapsed = max(1e-9, time.time() - train_start_time)
+        avg_sec_per_ep = elapsed / ep
+        if args.save_every > 0:
+            next_save_ep = ((ep // args.save_every) + 1) * args.save_every
+            if next_save_ep > args.episodes:
+                next_save_ep = args.episodes
+            eta_to_next_save_sec = max(0.0, (next_save_ep - ep) * avg_sec_per_ep)
+        else:
+            next_save_ep = args.episodes
+            eta_to_next_save_sec = max(0.0, (args.episodes - ep) * avg_sec_per_ep)
+
         if ep % args.log_every == 0:
             win_rate0 = wins0 / ep
             avg_rounds = rounds_sum / ep
             print(
                 f"ep={ep:6d}  loss={loss.item():.4f}  "
                 f"policy={total_policy_loss.item():.4f}  value={total_value_loss.item():.4f}  ent={total_entropy.item():.4f}  "
-                f"p0_winrate={win_rate0:.3f}  avg_rounds={avg_rounds:.2f}  last_scores={scores}"
+                f"p0_winrate={win_rate0:.3f}  avg_rounds={avg_rounds:.2f}  last_scores={scores}  "
+                f"next_ckpt_ep={next_save_ep}  eta_next_ckpt={eta_to_next_save_sec/60.0:.1f}m"
             )
 
         if ep % args.save_every == 0:
@@ -125,7 +139,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-every", type=int, default=200)
     p.add_argument("--save-every", type=int, default=2000)
     p.add_argument("--out-dir", type=str, default="rl_runs")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.log_every <= 0:
+        raise SystemExit("--log-every must be > 0.")
+    if args.save_every <= 0:
+        raise SystemExit("--save-every must be > 0.")
+    return args
 
 
 if __name__ == "__main__":
