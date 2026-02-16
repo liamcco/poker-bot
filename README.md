@@ -7,7 +7,8 @@ Train and play a reinforcement-learning poker agent for a custom Scandinavian-st
 - trick-taking showdown where only the last trick scores (+5)
 - race-to-target win condition with the "circle" rule
 
-Game rules are documented in `RULES.md`.
+Game rules are documented in `RULES.md`.  
+Model architecture and input/output specifications are documented in `MODEL.md`.
 
 ## Project Structure
 
