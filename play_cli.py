@@ -266,6 +266,28 @@ class PokerTUI(App[None]):
         height: 1fr;
     }
 
+    #startup_menu {
+        height: 4;
+        border: round #f6b73c;
+        padding: 0 1;
+        margin-bottom: 1;
+    }
+
+    #startup_buttons {
+        height: 3;
+        margin-bottom: 1;
+    }
+
+    .startup-opt {
+        width: 11;
+        margin-right: 1;
+    }
+
+    .startup-selected {
+        border: tall #f6b73c;
+        color: #ffe1a7;
+    }
+
     #status {
         height: 5;
         border: round #405f84;
@@ -362,19 +384,27 @@ class PokerTUI(App[None]):
         self.args = args
 
         self.device = torch.device("cuda" if (args.cuda and torch.cuda.is_available()) else "cpu")
-        self.rng = random.Random(args.seed)
-        torch.manual_seed(args.seed)
+        if args.seed is None:
+            self.seed = random.SystemRandom().randrange(0, 2**63)
+        else:
+            self.seed = args.seed
+        self.rng = random.Random(self.seed)
+        torch.manual_seed(self.seed)
         resolved_model_path = resolve_model_path(args.model_path, args.out_dir)
         if resolved_model_path is None:
             resolved_model_path = os.path.join(args.out_dir, "checkpoint_ep0.pt")
         self.model, self.model_msg = load_or_init_model(resolved_model_path, args.hidden, self.device)
         self.helper_model, self.helper_msg = load_or_init_model(resolved_model_path, args.hidden, self.device)
 
-        self.n_players = args.bots + 1
-        self.names = ["You"] + [f"Bot {i}" for i in range(1, args.bots + 1)]
-        self.scores = [0 for _ in range(self.n_players)]
-        self.last_round_scores = [0 for _ in range(self.n_players)]
-        self.circle_round: List[Optional[int]] = [None for _ in range(self.n_players)]
+        self.awaiting_start_menu = args.bots is None
+        self.selected_bots = 1 if args.bots is None else args.bots
+        self.game_started = False
+
+        self.n_players = 2
+        self.names = ["You", "Bot 1"]
+        self.scores = [0, 0]
+        self.last_round_scores = [0, 0]
+        self.circle_round: List[Optional[int]] = [None, None]
         self.announcement_order_start = 0
         self.starting_player = 0
         self.round_no = 0
@@ -405,6 +435,43 @@ class PokerTUI(App[None]):
         self._input_future: Optional[asyncio.Future] = None
 
         self.game_over = False
+        if not self.awaiting_start_menu:
+            self._configure_players(self.selected_bots)
+
+    def _configure_players(self, bots: int) -> None:
+        self.args.bots = bots
+        self.n_players = bots + 1
+        self.names = ["You"] + [f"Bot {i}" for i in range(1, bots + 1)]
+        self.scores = [0 for _ in range(self.n_players)]
+        self.last_round_scores = [0 for _ in range(self.n_players)]
+        self.circle_round = [None for _ in range(self.n_players)]
+        self.announcement_order_start = self.rng.randrange(self.n_players)
+        self.starting_player = self.announcement_order_start
+        self.round_no = 0
+
+        self.deck = None
+        self.hands = []
+        self.current_phase = -1
+        self.current_player = -1
+        self.current_trick_no = -1
+        self.current_led_suit = None
+        self.current_trick_cards = []
+        self.trick_history = []
+        self.table_trick_rows = []
+        self.round_discard_history = [[[] for _ in range(self.n_players)] for _ in range(2)]
+        self.round_shown_history = [None for _ in range(self.n_players)]
+        self.round_announced_points = [None for _ in range(self.n_players)]
+        self.round_passed = [False for _ in range(self.n_players)]
+        self.round_tie_reveal_events = []
+        self.input_mode = "idle"
+        self.selected_discards.clear()
+        self.current_legal_indices.clear()
+        self.revealed_card = None
+        self.helper_draw_indices = set()
+        self.helper_trick_index = None
+        self.helper_keep_choice = None
+        self._input_future = None
+        self.game_over = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -415,6 +482,11 @@ class PokerTUI(App[None]):
                 yield Static(id="trick_state")
                 yield RichLog(id="log", highlight=False, markup=False, auto_scroll=True)
             with Vertical(id="center_col"):
+                yield Static("", id="startup_menu")
+                with Horizontal(id="startup_buttons"):
+                    for i in range(1, 6):
+                        yield Button(f"{i} Opp", id=f"startup-bots-{i}", classes="startup-opt")
+                    yield Button("Start", id="startup-start", classes="startup-opt")
                 yield Static("Cards On Table (Round History)", id="played_title")
                 yield Static("", id="table_view")
                 yield Static("", id="center_spacer")
@@ -437,6 +509,17 @@ class PokerTUI(App[None]):
         self._refresh_all()
         self._log(self.model_msg)
         self._log(self.helper_msg)
+        if self.awaiting_start_menu:
+            self._log("Select opponent count in the startup menu, then press Start.")
+        else:
+            self._start_game()
+
+    def _start_game(self) -> None:
+        if self.game_started:
+            return
+        self.game_started = True
+        self._log(f"Run seed: {self.seed}")
+        self._log(f"Initial round leader selected randomly: {self.names[self.announcement_order_start]}")
         self._log("Helper active: red marker shows what the helper model would do.")
         self._log(f"Device: {self.device}")
         self.run_worker(self._game_loop(), exclusive=True)
@@ -463,6 +546,7 @@ class PokerTUI(App[None]):
         self.query_one("#reject", Button).disabled = False
 
     def _refresh_all(self) -> None:
+        self._refresh_startup_menu()
         self._refresh_status()
         self._refresh_scores()
         self._refresh_trick_state()
@@ -470,6 +554,25 @@ class PokerTUI(App[None]):
         self._refresh_hand_buttons()
         self._refresh_hint_bars()
         self._refresh_helper_controls()
+
+    def _refresh_startup_menu(self) -> None:
+        startup_menu = self.query_one("#startup_menu", Static)
+        startup_buttons = self.query_one("#startup_buttons", Horizontal)
+        if self.awaiting_start_menu:
+            startup_menu.display = True
+            startup_buttons.display = True
+            startup_menu.update("Startup Menu\nChoose number of opponents before beginning.")
+        else:
+            startup_menu.display = False
+            startup_buttons.display = False
+
+        for i in range(1, 6):
+            btn = self.query_one(f"#startup-bots-{i}", Button)
+            btn.remove_class("startup-selected")
+            if self.awaiting_start_menu and i == self.selected_bots:
+                btn.add_class("startup-selected")
+            btn.disabled = not self.awaiting_start_menu
+        self.query_one("#startup-start", Button).disabled = not self.awaiting_start_menu
 
     def _refresh_hint_bars(self) -> None:
         helper_indices: set[int] = set()
@@ -516,7 +619,9 @@ class PokerTUI(App[None]):
         current_name = "-" if self.current_player < 0 else self.names[self.current_player]
         title = f"Round {self.round_no} | Phase: {phase_txt} | Turn: {current_name}"
 
-        if self.input_mode == "draw_select":
+        if self.awaiting_start_menu:
+            prompt = "Use startup menu to choose opponents and press Start."
+        elif self.input_mode == "draw_select":
             prompt = "Select cards to discard, then press Confirm."
         elif self.input_mode == "draw_reveal":
             prompt = "Shown card drawn. Choose Keep or Reject."
@@ -996,6 +1101,19 @@ class PokerTUI(App[None]):
         if button_id is None:
             return
 
+        if button_id.startswith("startup-bots-") and self.awaiting_start_menu:
+            self.selected_bots = int(button_id.split("-")[-1])
+            self._refresh_startup_menu()
+            return
+
+        if button_id == "startup-start" and self.awaiting_start_menu:
+            self.awaiting_start_menu = False
+            self._configure_players(self.selected_bots)
+            self._refresh_all()
+            self._log(f"Selected opponents: {self.selected_bots}")
+            self._start_game()
+            return
+
         if button_id.startswith("card-"):
             idx = int(button_id.split("-")[1])
             if self.input_mode == "draw_select":
@@ -1068,12 +1186,17 @@ def parse_args() -> argparse.Namespace:
         help="Training output directory used to auto-pick latest checkpoint.",
     )
     p.add_argument("--hidden", type=int, default=256, help="Hidden size for random fallback model.")
-    p.add_argument("--bots", type=int, default=1, help="Number of model opponents (1-5).")
+    p.add_argument(
+        "--bots",
+        type=int,
+        default=None,
+        help="Number of model opponents (1-5). If omitted, pick in the TUI startup menu.",
+    )
     p.add_argument("--target", type=int, default=50, help="Score target for getting a circle.")
-    p.add_argument("--seed", type=int, default=123)
+    p.add_argument("--seed", type=int, default=None, help="Optional deterministic seed. Default: random each run.")
     p.add_argument("--cuda", action="store_true")
     args = p.parse_args()
-    if args.bots < 1 or args.bots > 5:
+    if args.bots is not None and (args.bots < 1 or args.bots > 5):
         raise SystemExit("--bots must be between 1 and 5.")
     return args
 
