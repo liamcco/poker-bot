@@ -8,7 +8,38 @@ import time
 import torch
 import torch.nn.functional as F
 
-from poker_ml import PolicyNet, compute_returns, run_episode
+from poker_ml import PolicyNet, compute_returns, play_episode_with_policies, run_episode
+
+
+def evaluate_vs_fresh_random(
+    model: PolicyNet,
+    rng: random.Random,
+    device: torch.device,
+    target_score: int,
+    hidden: int,
+    episodes: int,
+) -> float:
+    wins = 0
+    for i in range(episodes):
+        random_actor = PolicyNet(hidden=hidden).to(device)
+        random_actor.eval()
+
+        if i % 2 == 0:
+            policies = [model, random_actor]
+            learner_idx = 0
+        else:
+            policies = [random_actor, model]
+            learner_idx = 1
+
+        winner, _, _ = play_episode_with_policies(
+            models=policies,
+            rng=rng,
+            device=device,
+            target_score=target_score,
+        )
+        if winner == learner_idx:
+            wins += 1
+    return wins / max(1, episodes)
 
 
 def train(args: argparse.Namespace) -> None:
@@ -23,32 +54,31 @@ def train(args: argparse.Namespace) -> None:
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    wins0 = 0
-    rounds_sum = 0
     train_start_time = time.time()
+    bots_cycle = list(range(args.min_bots, args.max_bots + 1))
+    if not bots_cycle:
+        raise RuntimeError("Invalid bot cycle configuration.")
 
     for ep in range(1, args.episodes + 1):
+        n_bots = bots_cycle[(ep - 1) % len(bots_cycle)]
+        n_players = n_bots + 1
         model.train()
         trajs, winner, scores, rounds = run_episode(
             model=model,
             rng=rng,
             device=device,
-            n_players=args.players,
+            n_players=n_players,
             target_score=args.target,
             gamma=args.gamma,
             winner_bonus=args.winner_bonus,
         )
-
-        rounds_sum += rounds
-        if winner == 0:
-            wins0 += 1
 
         total_policy_loss = torch.tensor(0.0, device=device)
         total_value_loss = torch.tensor(0.0, device=device)
         total_entropy = torch.tensor(0.0, device=device)
         step_count = 0
 
-        for p in range(args.players):
+        for p in range(len(trajs)):
             traj = trajs[p]
             rewards = [sr.reward for sr in traj]
             returns = compute_returns(rewards, args.gamma).to(device)
@@ -91,25 +121,27 @@ def train(args: argparse.Namespace) -> None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         opt.step()
 
-        elapsed = max(1e-9, time.time() - train_start_time)
-        avg_sec_per_ep = elapsed / ep
-        if args.save_every > 0:
-            next_save_ep = ((ep // args.save_every) + 1) * args.save_every
-            if next_save_ep > args.episodes:
-                next_save_ep = args.episodes
-            eta_to_next_save_sec = max(0.0, (next_save_ep - ep) * avg_sec_per_ep)
-        else:
-            next_save_ep = args.episodes
-            eta_to_next_save_sec = max(0.0, (args.episodes - ep) * avg_sec_per_ep)
-
         if ep % args.log_every == 0:
-            win_rate0 = wins0 / ep
-            avg_rounds = rounds_sum / ep
             print(
                 f"ep={ep:6d}  loss={loss.item():.4f}  "
                 f"policy={total_policy_loss.item():.4f}  value={total_value_loss.item():.4f}  ent={total_entropy.item():.4f}  "
-                f"p0_winrate={win_rate0:.3f}  avg_rounds={avg_rounds:.2f}  last_scores={scores}  "
-                f"next_ckpt_ep={next_save_ep}  eta_next_ckpt={eta_to_next_save_sec/60.0:.1f}m"
+                f"bots_this_ep={n_bots}  last_scores={scores}"
+            )
+
+        if ep % args.eval_every == 0:
+            model.eval()
+            wr = evaluate_vs_fresh_random(
+                model=model,
+                rng=rng,
+                device=device,
+                target_score=args.target,
+                hidden=args.hidden,
+                episodes=args.eval_episodes,
+            )
+            elapsed = max(1e-9, time.time() - train_start_time)
+            print(
+                f"eval ep={ep:6d}  vs_fresh_random_winrate={wr:.3f}  "
+                f"eval_games={args.eval_episodes}  elapsed_min={elapsed/60.0:.1f}"
             )
 
         if ep % args.save_every == 0:
@@ -125,7 +157,8 @@ def train(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--episodes", type=int, default=20000)
-    p.add_argument("--players", type=int, default=4)
+    p.add_argument("--min-bots", type=int, default=1, help="Minimum opponents per episode in the training cycle.")
+    p.add_argument("--max-bots", type=int, default=4, help="Maximum opponents per episode in the training cycle.")
     p.add_argument("--target", type=int, default=50)
     p.add_argument("--hidden", type=int, default=256)
     p.add_argument("--lr", type=float, default=3e-4)
@@ -137,6 +170,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=123)
     p.add_argument("--cuda", action="store_true")
     p.add_argument("--log-every", type=int, default=200)
+    p.add_argument("--eval-every", type=int, default=500)
+    p.add_argument("--eval-episodes", type=int, default=20)
     p.add_argument("--save-every", type=int, default=2000)
     p.add_argument("--out-dir", type=str, default="rl_runs")
     args = p.parse_args()
@@ -144,6 +179,12 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--log-every must be > 0.")
     if args.save_every <= 0:
         raise SystemExit("--save-every must be > 0.")
+    if args.eval_every <= 0:
+        raise SystemExit("--eval-every must be > 0.")
+    if args.eval_episodes <= 0:
+        raise SystemExit("--eval-episodes must be > 0.")
+    if args.min_bots < 1 or args.max_bots > 4 or args.min_bots > args.max_bots:
+        raise SystemExit("--min-bots/--max-bots must define a valid range within [1, 4].")
     return args
 
 

@@ -554,6 +554,181 @@ def run_episode(
             return trajs, winner, scores, rounds
 
 
+def play_episode_with_policies(
+    models: Sequence[PolicyNet],
+    rng: random.Random,
+    device: torch.device,
+    target_score: int,
+) -> Tuple[int, List[int], int]:
+    n_players = len(models)
+    scores = [0] * n_players
+    circle_round: List[Optional[int]] = [None for _ in range(n_players)]
+    announcement_order_start = 0
+    rounds = 0
+
+    while True:
+        rounds += 1
+        round_start_scores = scores[:]
+        deck = Deck(rng)
+        hands = [deck.draw(5) for _ in range(n_players)]
+        table_history: List[List[Optional[Card]]] = [[None for _ in range(n_players)] for _ in range(MAX_TRICKS)]
+        discard_history: List[List[List[Card]]] = [[[] for _ in range(n_players)] for _ in range(DRAW_PHASES)]
+        shown_history: List[Optional[Tuple[Card, bool]]] = [None for _ in range(n_players)]
+        announced_points: List[Optional[int]] = [None for _ in range(n_players)]
+        passed: List[bool] = [False for _ in range(n_players)]
+        tie_reveal_events: List[TieRevealEvent] = []
+        showdown_starter: Optional[int] = None
+
+        for off in range(n_players):
+            p = (announcement_order_start + off) % n_players
+            obs = build_obs_draw(
+                hands[p],
+                phase=0,
+                scores=scores,
+                last_round_scores=round_start_scores,
+                n_players=n_players,
+                self_player=p,
+                target_score=target_score,
+                showdown_starter=announcement_order_start,
+                table_history=table_history,
+                discard_history=discard_history,
+                shown_history=shown_history,
+                announced_points=announced_points,
+                passed=passed,
+                tie_reveal_events=tie_reveal_events,
+            ).to(device)
+            with torch.no_grad():
+                discard_logits, _, _ = models[p](obs)
+            draw_mask = build_draw_action_mask(len(deck.cards), phase=0).to(device)
+            a = sample_categorical(discard_logits, mask=draw_mask)
+            discard_mask = a & 0b1_1111
+            draw_outcome = apply_draw(
+                deck,
+                hands[p],
+                discard_mask,
+                reject_single_draw=False,
+                reveal_single_draw=False,
+            )
+            discard_history[0][p].extend(draw_outcome.discarded_cards)
+
+        phase1_winner, phase1_hv = best_hand_index(hands)
+        if phase1_hv.category == Category.STRAIGHT_FLUSH:
+            return phase1_winner, scores, rounds
+
+        announce_result = resolve_first_scoring_announcements(hands, start_player=announcement_order_start)
+        announced_points = announce_result.announced_points
+        passed = announce_result.passed
+        tie_reveal_events = announce_result.tie_reveal_events
+        showdown_starter = announce_result.showdown_starter
+        if announce_result.scoring_winner is not None and announce_result.winning_points > 0:
+            w1 = announce_result.scoring_winner
+            scores[w1] += announce_result.winning_points
+            if scores[w1] >= target_score and circle_round[w1] is None:
+                circle_round[w1] = rounds
+
+        for off in range(n_players):
+            p = (announcement_order_start + off) % n_players
+            obs = build_obs_draw(
+                hands[p],
+                phase=1,
+                scores=scores,
+                last_round_scores=round_start_scores,
+                n_players=n_players,
+                self_player=p,
+                target_score=target_score,
+                showdown_starter=showdown_starter,
+                table_history=table_history,
+                discard_history=discard_history,
+                shown_history=shown_history,
+                announced_points=announced_points,
+                passed=passed,
+                tie_reveal_events=tie_reveal_events,
+            ).to(device)
+            with torch.no_grad():
+                discard_logits, _, _ = models[p](obs)
+            draw_mask = build_draw_action_mask(len(deck.cards), phase=1).to(device)
+            a = sample_categorical(discard_logits, mask=draw_mask)
+            discard_mask = a & 0b1_1111
+            reject_single_draw = ((a >> 5) & 1) == 1 and bin(discard_mask).count("1") == 1
+            draw_outcome = apply_draw(
+                deck,
+                hands[p],
+                discard_mask,
+                reject_single_draw=reject_single_draw,
+                reveal_single_draw=True,
+            )
+            discard_history[1][p].extend(draw_outcome.discarded_cards)
+            if draw_outcome.shown_card is not None and draw_outcome.kept_shown is not None:
+                shown_history[p] = (draw_outcome.shown_card, draw_outcome.kept_shown)
+
+        w2, hv2 = best_hand_index(hands)
+        if hv2.category == Category.STRAIGHT_FLUSH:
+            return w2, scores, rounds
+        scores[w2] += hv2.points
+        if scores[w2] >= target_score and circle_round[w2] is None:
+            circle_round[w2] = rounds
+
+        trick_hands = [h[:] for h in hands]
+        leader = showdown_starter if showdown_starter is not None else announcement_order_start
+        last_winner = leader
+
+        for trick_no in range(5):
+            led_suit: Optional[Suit] = None
+            played: List[Tuple[int, Card]] = []
+
+            for off in range(n_players):
+                p = (leader + off) % n_players
+                hand = trick_hands[p]
+                legal = legal_indices(hand, led_suit)
+
+                obs = build_obs_trick(
+                    hand,
+                    led_suit,
+                    trick_no,
+                    scores=scores,
+                    last_round_scores=round_start_scores,
+                    n_players=n_players,
+                    self_player=p,
+                    target_score=target_score,
+                    table_history=table_history,
+                    discard_history=discard_history,
+                    shown_history=shown_history,
+                    announced_points=announced_points,
+                    passed=passed,
+                    tie_reveal_events=tie_reveal_events,
+                    showdown_starter=showdown_starter,
+                ).to(device)
+                with torch.no_grad():
+                    _, trick_logits, _ = models[p](obs)
+
+                mask = torch.zeros(5, dtype=torch.float32, device=device)
+                for idx in legal:
+                    mask[idx] = 1.0
+                a = sample_categorical(trick_logits, mask=mask)
+                if a not in legal:
+                    a = legal[0]
+
+                card = hand.pop(a)
+                if led_suit is None:
+                    led_suit = card.suit
+                played.append((p, card))
+                table_history[trick_no][p] = card
+
+            assert led_suit is not None
+            eligible = [(p, c) for (p, c) in played if c.suit == led_suit]
+            winner, _ = max(eligible, key=lambda pc: (int(pc[1].rank), int(pc[1].suit)))
+            leader = winner
+            last_winner = winner
+
+        scores[last_winner] += 5
+        if scores[last_winner] >= target_score and circle_round[last_winner] is None:
+            circle_round[last_winner] = rounds
+
+        announcement_order_start = (announcement_order_start + 1) % n_players
+        if circle_round[last_winner] is not None and circle_round[last_winner] < rounds:
+            return last_winner, scores, rounds
+
+
 def compute_returns(rewards: List[float], gamma: float) -> torch.Tensor:
     G = 0.0
     out = []
