@@ -12,7 +12,12 @@ Model architecture and input/output specifications are documented in `MODEL.md`.
 
 ## Project Structure
 
-- `game_logic.py`: core game entities and rules (cards, hand evaluation, draw logic, announcement/tie resolution, legal trick plays)
+- `game_logic/`: core game entities and rules split by concern:
+  - `cards.py` (cards, ranks/suits, deck, card IDs)
+  - `hand_eval.py` (hand evaluation and comparison)
+  - `draw.py` (draw/discard application)
+  - `scoring.py` (announcement/tie-break resolution)
+  - `trick.py` (legal trick-play indices)
 - `poker_ml.py`: model, observation encoding, self-play episode simulation, and utility functions
 - `main.py`: training entrypoint (policy-gradient style loop, checkpointing, periodic eval vs fresh random actor)
 - `play_cli.py`: Textual TUI for human play against the latest trained checkpoint
