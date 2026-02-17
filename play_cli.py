@@ -17,6 +17,7 @@ from game_logic import (
     Suit,
     TieRevealEvent,
     best_hand_index,
+    evaluate_hand,
     legal_indices,
     resolve_first_scoring_announcements,
 )
@@ -375,6 +376,10 @@ class PokerTUI(App[None]):
         width: 16;
         margin-right: 1;
     }
+
+    .confirm-helper-no-draw {
+        border-bottom: tall #d83a56;
+    }
     """
 
     BINDINGS = [("q", "quit", "Quit")]
@@ -696,13 +701,17 @@ class PokerTUI(App[None]):
     def _refresh_helper_controls(self) -> None:
         keep_btn = self.query_one("#keep", Button)
         reject_btn = self.query_one("#reject", Button)
+        confirm_btn = self.query_one("#confirm", Button)
         keep_btn.remove_class("helper")
         reject_btn.remove_class("helper")
+        confirm_btn.remove_class("confirm-helper-no-draw")
         if self.input_mode == "draw_reveal" and self.helper_keep_choice is not None:
             if self.helper_keep_choice:
                 keep_btn.add_class("helper")
             else:
                 reject_btn.add_class("helper")
+        elif self.input_mode == "draw_select" and not self.helper_draw_indices:
+            confirm_btn.add_class("confirm-helper-no-draw")
 
     def _compute_helper_draw_hint(self, phase: int) -> None:
         if self.deck is None or not self.hands:
@@ -859,8 +868,15 @@ class PokerTUI(App[None]):
 
         self._refresh_all()
 
+    def _log_player_hand_categories(self) -> None:
+        """Log each player's hand category in order by player index."""
+        for p in range(self.n_players):
+            hand_val = evaluate_hand(self.hands[p])
+            self._log(f"{self.names[p]}: {category_name(hand_val.category)}")
+
     def _run_first_scoring_announcements(self) -> None:
         self._log("--- Scoring Phase 1: Announcements ---")
+        self._log_player_hand_categories()
         result = resolve_first_scoring_announcements(self.hands, start_player=self.announcement_order_start)
         self.round_announced_points = result.announced_points
         self.round_passed = result.passed
@@ -956,6 +972,10 @@ class PokerTUI(App[None]):
         if phase == 0:
             self._run_first_scoring_announcements()
             return None
+
+        # Scoring Phase 2
+        self._log("--- Scoring Phase 2 ---")
+        self._log_player_hand_categories()
 
         if hv.points > 0:
             self.scores[winner] += hv.points
