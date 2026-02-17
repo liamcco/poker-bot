@@ -248,6 +248,18 @@ class PokerTUI(App[None]):
         color: #f4f4f4;
     }
 
+    Button {
+        text-style: none;
+    }
+
+    Button:hover {
+        text-style: none;
+    }
+
+    Button:focus {
+        text-style: none;
+    }
+
     #layout {
         height: 1fr;
     }
@@ -310,13 +322,6 @@ class PokerTUI(App[None]):
 
     #scores {
         height: 8;
-        border: round #405f84;
-        padding: 0 1;
-        margin-bottom: 1;
-    }
-
-    #trick_state {
-        height: 12;
         border: round #405f84;
         padding: 0 1;
         margin-bottom: 1;
@@ -496,7 +501,6 @@ class PokerTUI(App[None]):
             with Vertical(id="left_col"):
                 yield Static(id="status")
                 yield Static(id="scores")
-                yield Static(id="trick_state")
                 yield RichLog(id="log", highlight=False, markup=False, auto_scroll=True)
             with Vertical(id="center_col"):
                 yield Static("", id="startup_menu")
@@ -522,6 +526,8 @@ class PokerTUI(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        for button in self.query(Button):
+            button.can_focus = False
         self._set_default_controls()
         self._refresh_all()
         self._log(self.model_msg)
@@ -566,7 +572,6 @@ class PokerTUI(App[None]):
         self._refresh_startup_menu()
         self._refresh_status()
         self._refresh_scores()
-        self._refresh_trick_state()
         self._refresh_table_cards()
         self._refresh_hand_buttons()
         self._refresh_hint_bars()
@@ -658,26 +663,6 @@ class PokerTUI(App[None]):
             circle_text = "" if circle is None else f" (circle@r{circle})"
             lines.append(f"{name}: {self.scores[i]}{circle_text}")
         self.query_one("#scores", Static).update("\n".join(lines))
-
-    def _refresh_trick_state(self) -> None:
-        lines = ["Trick Board"]
-        if self.current_trick_no >= 0:
-            led = "-" if self.current_led_suit is None else SUIT_TO_STR[self.current_led_suit]
-            lines.append(f"Current trick: {self.current_trick_no + 1}")
-            lines.append(f"Led suit: {led}")
-            if self.current_trick_cards:
-                lines.append("Cards played:")
-                for p, card in self.current_trick_cards:
-                    lines.append(f"{self.names[p]}: {card_str(card)}")
-        else:
-            lines.append("No active trick.")
-
-        if self.trick_history:
-            lines.append("")
-            lines.append("Recent:")
-            lines.extend(self.trick_history[-3:])
-
-        self.query_one("#trick_state", Static).update("\n".join(lines))
 
     def _refresh_hand_buttons(self) -> None:
         hand = self.hands[0] if self.hands else []
@@ -1049,7 +1034,6 @@ class PokerTUI(App[None]):
                 if p == 0:
                     self.hands[0] = hand
                     self._refresh_hand_buttons()
-                self._refresh_trick_state()
                 self._refresh_table_cards()
                 await asyncio.sleep(0.12)
 
@@ -1060,12 +1044,10 @@ class PokerTUI(App[None]):
             summary = f"Trick {trick_no + 1} winner: {self.names[winner]}"
             self.trick_history.append(summary)
             self._log(summary)
-            self._refresh_trick_state()
 
         self.current_trick_no = -1
         self.current_led_suit = None
         self.current_trick_cards = []
-        self._refresh_trick_state()
         self._refresh_table_cards()
         return last_winner
 
