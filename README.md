@@ -20,7 +20,13 @@ Model architecture and input/output specifications are documented in `MODEL.md`.
   - `trick.py` (legal trick-play indices)
 - `poker_ml.py`: model, observation encoding, self-play episode simulation, and utility functions
 - `main.py`: training entrypoint (policy-gradient style loop, checkpointing, periodic eval vs fresh random actor)
-- `play_cli.py`: Textual TUI for human play against the latest trained checkpoint
+- `poker_cli/`: Textual CLI implementation split by concern:
+  - `app.py` (main app controller + round flow)
+  - `styles.py` (UI stylesheet)
+  - `display.py` (card formatting + log labels)
+  - `bot_policy.py` (model action selection wrappers)
+  - `model_io.py` (checkpoint resolve/load helpers)
+- `play_cli.py`: compatibility entrypoint that launches `poker_cli.app`
 
 ## Requirements
 
