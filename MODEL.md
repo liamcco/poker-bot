@@ -81,7 +81,7 @@ The model receives a **single observation vector of 4,087 dimensions**. This vec
 | **Table History** | 1,560 | Cards played in all tricks (5 tricks × 6 players × 52) |
 | **Discard History** | 624 | Discarded cards (2 phases × 6 players × 52) |
 | **Shown History** | 330 | Revealed single-draw cards (6 players × 55) |
-| **Announcement Context** | 60 | Announced points and pass flags (6 players × 10) |
+| **Announcement Context** | 60 | Own announced points + public announce/pass flags (6 players × 10) |
 | **Tie Reveal Events** | 1,216 | Tie-breaking reveals (64 events × 19) |
 | **TOTAL** | **4,087** | |
 
@@ -161,7 +161,7 @@ The model has access to **all legal information** according to the game rules. T
 - **Table history**: All cards played in all tricks so far this round
 - **Discard counts**: Number of cards discarded by each player in each draw phase
 - **Shown cards**: Cards revealed during single-card draws in phase 2
-- **Announcements**: Points announced by each player in phase 1
+- **Announcements**: Own announced points plus public announce/pass state for all players in phase 1
 - **Tie reveals**: Incremental information revealed during announcement tie-breaking
 - **Game state**: Current phase, trick number, led suit
 
@@ -280,7 +280,7 @@ Total: 6 × (52 + 3) = 330 dimensions
 **Structure**: 6 players × 10 dimensions per player
 
 For each player, encodes announcements from phase 1:
-- **Announced points** (8-dim one-hot): Point value announced (0-7)
+- **Announced points** (8-dim one-hot): Point value announced (0-7), only populated for the observing player
 - **Announced flag** (1 bit): 1.0 if player announced, 0.0 otherwise
 - **Pass flag** (1 bit): 1.0 if player passed, 0.0 otherwise
 
@@ -294,10 +294,12 @@ Encodes the sequential tie-breaking reveals during announcement resolution:
 - **Player** (6-dim one-hot): Which player revealed
 - **Component index** (10-dim one-hot): Which tie-break component (0-9)
 - **Value present flag** (1 bit): 1.0 if a value was revealed
-- **Value absent flag** (1 bit): 1.0 if player had no value to reveal (passed)
+- **Value absent flag** (1 bit): 1.0 if player passed
 - **Revealed value** (1 float): Normalized value (0-14) / 14.0
 
 Total: 64 × (6 + 10 + 2 + 1) = 1,216 dimensions
+
+If both flags are 0, the event represents **Higher** (beats current best without revealing exact value).
 
 **Note**: Most event slots are empty (all zeros) in typical games.
 

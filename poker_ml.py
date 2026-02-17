@@ -131,6 +131,7 @@ def encode_announcement_context(
     announced_points: Sequence[Optional[int]],
     passed: Sequence[bool],
     n_players: int,
+    announced_flags: Optional[Sequence[bool]] = None,
 ) -> torch.Tensor:
     # Per player: one-hot announced points [0..7] + [announced_flag, pass_flag].
     per_player = ANNOUNCE_POINT_BINS + 2
@@ -139,13 +140,35 @@ def encode_announcement_context(
         base = p * per_player
         points = announced_points[p] if p < len(announced_points) else None
         did_pass = bool(passed[p]) if p < len(passed) else False
+        did_announce = (
+            bool(announced_flags[p]) if announced_flags is not None and p < len(announced_flags) else points is not None
+        )
         if points is not None:
             points_idx = max(0, min(int(points), ANNOUNCE_POINT_BINS - 1))
             x[base + points_idx] = 1.0
+        if did_announce:
             x[base + ANNOUNCE_POINT_BINS] = 1.0
         if did_pass:
             x[base + ANNOUNCE_POINT_BINS + 1] = 1.0
     return x
+
+
+def mask_announced_points_for_observer(
+    announced_points: Sequence[Optional[int]],
+    passed: Sequence[bool],
+    n_players: int,
+    self_player: int,
+) -> Tuple[List[Optional[int]], List[bool]]:
+    masked_points: List[Optional[int]] = [None for _ in range(n_players)]
+    announced_flags: List[bool] = [False for _ in range(n_players)]
+    for p in range(min(n_players, MAX_PLAYERS)):
+        points = announced_points[p] if p < len(announced_points) else None
+        did_pass = bool(passed[p]) if p < len(passed) else False
+        did_announce = points is not None and not did_pass
+        announced_flags[p] = did_announce
+        if p == self_player:
+            masked_points[p] = points
+    return masked_points, announced_flags
 
 
 def encode_tie_reveal_events(events: Sequence[TieRevealEvent]) -> torch.Tensor:
@@ -157,12 +180,15 @@ def encode_tie_reveal_events(events: Sequence[TieRevealEvent]) -> torch.Tensor:
             x[base + ev.player] = 1.0
         comp_idx = max(0, min(int(ev.component_idx), MAX_TIE_COMPONENTS - 1))
         x[base + MAX_PLAYERS + comp_idx] = 1.0
-        if ev.revealed_value is None:
+        if ev.outcome == "pass":
             x[base + MAX_PLAYERS + MAX_TIE_COMPONENTS + 1] = 1.0
-        else:
+        elif ev.outcome == "reveal" and ev.revealed_value is not None:
             x[base + MAX_PLAYERS + MAX_TIE_COMPONENTS] = 1.0
             # Rank/suit tie fields are bounded; normalize to a stable range.
             x[base + MAX_PLAYERS + MAX_TIE_COMPONENTS + 2] = float(ev.revealed_value) / 14.0
+        else:
+            # "higher" leaves both flags at 0 and hides the exact value.
+            pass
     return x
 
 
@@ -191,7 +217,18 @@ def build_context_features(
     x_table = encode_table_history(table_history, n_players)
     x_discards = encode_discard_history(discard_history, n_players)
     x_shown = encode_shown_history(shown_history, n_players)
-    x_announce = encode_announcement_context(announced_points, passed, n_players)
+    masked_announced_points, announced_flags = mask_announced_points_for_observer(
+        announced_points,
+        passed,
+        n_players,
+        self_player,
+    )
+    x_announce = encode_announcement_context(
+        masked_announced_points,
+        passed,
+        n_players,
+        announced_flags=announced_flags,
+    )
     x_reveals = encode_tie_reveal_events(tie_reveal_events)
     return torch.cat([x_scores, x_last_round_scores, x_table, x_discards, x_shown, x_announce, x_reveals], dim=0)
 

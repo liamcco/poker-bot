@@ -17,7 +17,6 @@ from game_logic import (
     Suit,
     TieRevealEvent,
     best_hand_index,
-    evaluate_hand,
     legal_indices,
     resolve_first_scoring_announcements,
 )
@@ -170,7 +169,7 @@ def choose_bot_trick_action(
 
 def category_name(cat: Category) -> str:
     names = {
-        Category.HIGH: "High Card",
+        Category.NOTHING: "Pass",
         Category.PAIR: "Pair",
         Category.TWOPAIR: "Two Pair",
         Category.TRIPS: "Trips",
@@ -181,6 +180,19 @@ def category_name(cat: Category) -> str:
         Category.STRAIGHT_FLUSH: "Straight Flush",
     }
     return names[cat]
+
+
+def announced_hand_name(points: int) -> str:
+    names = {
+        1: "pair",
+        2: "two pair",
+        3: "trips",
+        4: "straight",
+        5: "flush",
+        6: "full house",
+        7: "quads",
+    }
+    return names.get(points, f"{points} point(s)")
 
 
 def load_or_init_model(checkpoint_path: str, hidden: int, device: torch.device) -> Tuple[PolicyNet, str]:
@@ -868,15 +880,8 @@ class PokerTUI(App[None]):
 
         self._refresh_all()
 
-    def _log_player_hand_categories(self) -> None:
-        """Log each player's hand category in order by player index."""
-        for p in range(self.n_players):
-            hand_val = evaluate_hand(self.hands[p])
-            self._log(f"{self.names[p]}: {category_name(hand_val.category)}")
-
     def _run_first_scoring_announcements(self) -> None:
         self._log("--- Scoring Phase 1: Announcements ---")
-        self._log_player_hand_categories()
         result = resolve_first_scoring_announcements(self.hands, start_player=self.announcement_order_start)
         self.round_announced_points = result.announced_points
         self.round_passed = result.passed
@@ -889,19 +894,18 @@ class PokerTUI(App[None]):
             if announced is None:
                 self._log(f"{self.names[p]}: pass")
             else:
-                self._log(f"{self.names[p]}: announces {announced} point(s)")
-
-        self._log(
-            f"{self.names[self.starting_player]} is this round's leader seat "
-            "(draws first, announces first, and leads showdown)."
-        )
+                self._log(f"{self.names[p]}: announces {announced_hand_name(announced)}")
 
         if result.tie_reveal_events:
             self._log("Tie-break reveal sequence:")
             for ev in result.tie_reveal_events:
-                if ev.revealed_value is None:
+                if ev.outcome == "pass":
                     self._log(
-                        f"  {self.names[ev.player]} passes at tie step {ev.component_idx + 1}."
+                        f"  {self.names[ev.player]}: pass (tie step {ev.component_idx + 1})."
+                    )
+                elif ev.outcome == "higher":
+                    self._log(
+                        f"  {self.names[ev.player]}: Higher (tie step {ev.component_idx + 1})."
                     )
                 else:
                     self._log(
@@ -975,7 +979,6 @@ class PokerTUI(App[None]):
 
         # Scoring Phase 2
         self._log("--- Scoring Phase 2 ---")
-        self._log_player_hand_categories()
 
         if hv.points > 0:
             self.scores[winner] += hv.points

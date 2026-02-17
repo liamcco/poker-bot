@@ -58,7 +58,7 @@ class Deck:
 
 
 class Category(IntEnum):
-    HIGH = 0
+    NOTHING = 0
     PAIR = 1
     TWOPAIR = 2
     TRIPS = 3
@@ -103,6 +103,9 @@ class AnnouncementResult:
 class TieRevealEvent:
     component_idx: int
     player: int
+    # "reveal" = exact tie value revealed, "higher" = beats current best without
+    # exposing exact value, "pass" = cannot beat current best.
+    outcome: str
     revealed_value: Optional[int]
 
 
@@ -213,8 +216,8 @@ def evaluate_hand(cards: Sequence[Card]) -> HandValue:
         return HandValue(Category.PAIR, tuple(int(x) for x in key))
 
     suit_by_rank = [max(int(c.suit) for c in cards if int(c.rank) == r) for r in ranks_desc]
-    key = (Category.HIGH, *ranks_desc, *suit_by_rank)
-    return HandValue(Category.HIGH, tuple(int(x) for x in key))
+    key = (Category.NOTHING, *ranks_desc, *suit_by_rank)
+    return HandValue(Category.NOTHING, tuple(int(x) for x in key))
 
 
 def best_hand_index(hands: List[List[Card]]) -> Tuple[int, HandValue]:
@@ -273,11 +276,24 @@ def resolve_first_scoring_announcements(
                     continue
                 v = tie_keys[p][comp_idx] if comp_idx < len(tie_keys[p]) else -1
                 comp_values[p] = v
-                if current_best is None or v > current_best:
-                    tie_reveal_events.append(TieRevealEvent(component_idx=comp_idx, player=p, revealed_value=v))
+                if current_best is None:
+                    tie_reveal_events.append(
+                        TieRevealEvent(component_idx=comp_idx, player=p, outcome="reveal", revealed_value=v)
+                    )
                     current_best = v
+                elif v > current_best:
+                    tie_reveal_events.append(
+                        TieRevealEvent(component_idx=comp_idx, player=p, outcome="higher", revealed_value=None)
+                    )
+                    current_best = v
+                elif v == current_best:
+                    tie_reveal_events.append(
+                        TieRevealEvent(component_idx=comp_idx, player=p, outcome="reveal", revealed_value=v)
+                    )
                 else:
-                    tie_reveal_events.append(TieRevealEvent(component_idx=comp_idx, player=p, revealed_value=None))
+                    tie_reveal_events.append(
+                        TieRevealEvent(component_idx=comp_idx, player=p, outcome="pass", revealed_value=None)
+                    )
 
             if current_best is None:
                 continue
